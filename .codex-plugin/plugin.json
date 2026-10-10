@@ -1,0 +1,15 @@
+{
+  "name": "cohub-cards",
+  "version": "0.3.0",
+  "description": "与 Agent 共用创作卡片，用 Cohub 生成图片、视频、语音和音乐，在对话中查看与发布作品。",
+  "author": { "name": "ATou" },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Cohub Cards",
+    "shortDescription": "共同创作，作品就在对话里",
+    "category": "Creativity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": ["帮我准备一张 Cohub 创作卡片，我可以直接修改并生成图片、视频或声音"]
+  }
+}
