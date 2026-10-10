@@ -42,8 +42,15 @@ test('view rejects active documents, mismatched media types and malformed inline
 class Element {
   constructor(tagName, ownerDocument) {
     this.tagName = tagName; this.ownerDocument = ownerDocument;
-    this.children = []; this.dataset = {}; this.className = ''; this.value = '';
-    this.classList = { add: (...names) => { this.className += ` ${names.join(' ')}`; } };
+    this.children = []; this.dataset = {}; this.className = ''; this.value = ''; this.paused = true; this.listeners = new Map();
+    this.style = { setProperty() {}, removeProperty() {} };
+    const names = () => this.className.split(/\s+/).filter(Boolean);
+    this.classList = {
+      add: (...added) => { this.className = [...new Set([...names(), ...added])].join(' '); },
+      remove: (...removed) => { this.className = names().filter(name => !removed.includes(name)).join(' '); },
+      toggle: (name, force = !names().includes(name)) => { if (force) this.classList.add(name); else this.classList.remove(name); return force; },
+      contains: name => names().includes(name),
+    };
   }
   set innerHTML(html) {
     this.children = [...html.matchAll(/<([a-z0-9]+)\b[^>]*class="([^"]+)"[^>]*>/g)].map(([, tag, classes]) => {
@@ -56,9 +63,14 @@ class Element {
   prepend(...nodes) { this.children.unshift(...nodes); }
   replaceChildren(...nodes) { this.children = nodes; }
   setAttribute() {}
-  addEventListener() {}
+  removeAttribute() {}
+  addEventListener(name, listener) { this.listeners.set(name, [...(this.listeners.get(name) || []), listener]); }
+  removeEventListener(name, listener) { this.listeners.set(name, (this.listeners.get(name) || []).filter(item => item !== listener)); }
+  dispatch(name) { for (const listener of this.listeners.get(name) || []) listener({ preventDefault() {}, stopPropagation() {} }); }
+  click() { if (!this.disabled) this.dispatch('click'); }
   insertAdjacentHTML() {}
-  pause() { this.paused = true; }
+  play() { this.paused = false; this.dispatch('play'); return Promise.resolve(); }
+  pause() { this.paused = true; this.dispatch('pause'); }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   querySelectorAll(selector) {
     const matches = node => selector.split(',').some(part => {
@@ -155,5 +167,33 @@ test('a failed read keeps the same preview and exposes the refresh failure', asy
   assert.equal(root.querySelector('.work-media'), original);
   assert.match(root.querySelector('.card-notices').textContent, /Cohub is unavailable/);
   assert.equal(root.querySelector('.cohub-card').dataset.stale, 'true');
+  view.destroy();
+});
+
+test('audio results get a play control, and starting one track pauses the other', () => {
+  const { view, root } = mount(async () => result());
+  view.render(result({ media: [{ type: 'audio', url: 'https://cdn.example.org/a.mp3' }, { type: 'audio', url: 'https://cdn.example.org/b.mp3' }] }));
+  const players = root.querySelectorAll('.work-media'), toggles = root.querySelectorAll('.audio-toggle');
+  assert.equal(players.length, 2);
+  assert.equal(toggles.length, 2);
+  toggles[0].click();
+  assert.equal(players[0].paused, false);
+  toggles[1].click();
+  assert.equal(players[1].paused, false);
+  assert.equal(players[0].paused, true);
+  toggles[1].click();
+  assert.equal(players[1].paused, true);
+  view.destroy();
+});
+
+test('optional task times must be valid dates', () => {
+  assert.equal(readCardResult(result({ startedAt: '2026-10-09T15:07:38.735Z', finishedAt: '2026-10-09T15:08:06.185Z' })).finishedAt, '2026-10-09T15:08:06.185Z');
+  for (const startedAt of ['soon', '', 5]) assert.throws(() => readCardResult(result({ startedAt })), /时间/);
+});
+
+test('a finished generation shows how long it took', () => {
+  const { view, root } = mount(async () => result());
+  view.render(result({ startedAt: '2026-10-09T15:07:38.735Z', finishedAt: '2026-10-09T15:08:06.185Z', media: [{ type: 'image', url: 'https://cdn.example.org/work.png' }] }));
+  assert.match(root.querySelector('.card-meta').textContent, /用时 27 秒/);
   view.destroy();
 });

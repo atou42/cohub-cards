@@ -24,7 +24,13 @@
 
 `src/cards.mjs` 校验 Cohub 返回的对象、空间和状态，展示实际生成媒体或 App 封面。`show_generation`、`show_publication` 打开结果卡；`read_card` 只更新已有结果。发布操作仍由 Skill 调用官方 CLI，发布成功和线上功能验收分别记录。
 
-`src/server.mjs` 提供上述工具及一份内嵌资源的页面，`web/app.js` 连接标准 MCP Apps 桥接。界面错误不会触发重新生成。原生宿主的 inline 展示和交互需要单独验收，浏览器预览及协议测试不能代替它。
+`src/server.mjs` 提供上述工具及一份内嵌资源的页面，`web/app.js` 连接标准 MCP Apps 桥接。
+
+## 界面
+
+视觉遵循 [DESIGN.md](DESIGN.md)，色值取自 Cohub 线上主题。`web/tokens.css` 定义明暗两套变量和共享组件，`web/card.css`、`web/composer.css` 只写各自布局，`web/icons.js` 提供线条图标。构建时把 Geist 与 Geist Mono 的拉丁子集（OFL）内嵌进页面，不在运行时请求字体。
+
+`web/card.js` 导出作品舞台（图片、视频、自定义音频播放条）和生成中的画框，结果卡与创作卡共用。生成中的计时取 Cohub 任务的 `startedAt`，缺失时从卡片首次看到任务开始计。校验结果里 `kind: "missing"` 表示“还差什么”，以提示显示；其余是无效值，以错误显示。保存因版本过旧被拒时，卡片立即读取新版本并让人选择保留哪份，不等下一次轮询。界面错误不会触发重新生成。原生宿主的 inline 展示和交互需要单独验收，浏览器预览及协议测试不能代替它。
 
 ## 运行与维护
 

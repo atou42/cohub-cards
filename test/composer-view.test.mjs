@@ -176,8 +176,14 @@ test('browser files exceeding 20 MiB or unsafe media are rejected before reading
 // Minimal DOM for the actual view's mode controls; draft behavior is tested above.
 class ViewElement {
   constructor(tagName, ownerDocument) {
-    Object.assign(this, { tagName, ownerDocument, children: [], dataset: {}, attributes: {}, className: '', hidden: false, disabled: false, _text: '', _value: undefined, listeners: new Map() });
-    this.classList = { add: (...names) => { this.className += ` ${names.join(' ')}`; } };
+    Object.assign(this, { tagName, ownerDocument, children: [], dataset: {}, attributes: {}, className: '', hidden: false, disabled: false, _text: '', _value: undefined, listeners: new Map(), style: { setProperty() {}, removeProperty() {} } });
+    const names = () => this.className.split(/\s+/).filter(Boolean);
+    this.classList = {
+      add: (...added) => { this.className = [...new Set([...names(), ...added])].join(' '); },
+      remove: (...removed) => { this.className = names().filter(name => !removed.includes(name)).join(' '); },
+      toggle: (name, force = !names().includes(name)) => { if (force) this.classList.add(name); else this.classList.remove(name); return force; },
+      contains: name => names().includes(name),
+    };
   }
   set innerHTML(html) {
     this.replaceChildren(); const stack = [this];
@@ -187,7 +193,7 @@ class ViewElement {
       const node = new ViewElement(token[1], this.ownerDocument);
       for (const [, key, value] of token[2].matchAll(/([\w-]+)="([^"]*)"/g)) node.setAttribute(key, value);
       stack.at(-1).append(node);
-      if (!['input', 'img', 'br'].includes(node.tagName)) stack.push(node);
+      if (!['input', 'img', 'br'].includes(node.tagName) && !token[2].trim().endsWith('/')) stack.push(node);
     }
   }
   set textContent(value) { this._text = String(value); this.children = []; }
@@ -199,9 +205,10 @@ class ViewElement {
   replaceChildren(...nodes) { this._text = ''; this.children = nodes; }
   setAttribute(key, value) { this.attributes[key] = value; if (key === 'class') this.className = value; }
   removeAttribute(key) { delete this.attributes[key]; }
-  addEventListener(name, listener) { this.listeners.set(name, listener); }
-  removeEventListener(name) { this.listeners.delete(name); }
-  fire(name) { return this.listeners.get(name)?.(); }
+  addEventListener(name, listener) { this.listeners.set(name, [...(this.listeners.get(name) || []), listener]); }
+  removeEventListener(name, listener) { this.listeners.set(name, (this.listeners.get(name) || []).filter(item => item !== listener)); }
+  fire(name, event = {}) { for (const listener of this.listeners.get(name) || []) listener({ preventDefault() {}, stopPropagation() {}, ...event }); }
+  focus() {}
   click() { if (!this.disabled) return this.fire('click'); }
   contains(node) { return this === node || this.children.some(child => child.contains(node)); }
   matches(selector) { return selector.split(',').some(part => { part = part.trim(); return part.startsWith('.') ? this.className.split(/\s+/).includes(part.slice(1)) : this.tagName === part; }); }
@@ -300,4 +307,131 @@ test('inline validation points to expanded editing while still blocking invalid 
   assert.match(find('.composer-feedback').textContent, /时长不支持/);
   assert.match(find('.composer-feedback').textContent, /展开编辑/);
   assert.equal(find('.composer-generate').disabled, true);
+});
+
+test('validation kinds are limited to the known value', () => {
+  const data = initial(); data.validation.errors = [{ path: 'prompt', message: '请输入生成内容', kind: 'missing' }];
+  assert.equal(readComposerResult(result(data)).validation.errors[0].kind, 'missing');
+  data.validation.errors[0].kind = 'cosmetic';
+  assert.throws(() => readComposerResult(result(data)), /校验/);
+});
+
+test('a fresh draft says what is still needed instead of raising an error', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { view, find } = mountComposerView(); t.after(() => view.destroy());
+  const data = initial(); data.draft.prompt = ''; data.validation.errors = [{ path: 'prompt', message: '请输入生成内容', kind: 'missing' }];
+  view.render(result(data));
+  assert.equal(find('.composer-feedback').querySelectorAll('.composer-notice--error').length, 0);
+  assert.match(find('.composer-feedback').textContent, /描述/);
+  assert.equal(find('.composer-generate').disabled, true);
+});
+
+test('an invalid value is shown as an error next to the action', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { view, find } = mountComposerView(); t.after(() => view.destroy());
+  const data = initial(); data.validation.errors = [{ path: 'parameters.duration', message: '不得大于 15' }];
+  view.render(result(data));
+  const errors = find('.composer-feedback').querySelectorAll('.composer-notice--error');
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].textContent, /时长/);
+  assert.doesNotMatch(errors[0].textContent, /parameters/);
+});
+
+test('saved state reads as plain language without internal revision numbers', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { view, find } = mountComposerView(); t.after(() => view.destroy());
+  assert.equal(find('.composer-save-state').textContent, '已保存');
+});
+
+test('Command or Control + Enter in the description generates once; plain Enter and IME input do not', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { view, find, backend } = mountComposerView(); t.after(() => view.destroy());
+  const submits = () => backend.calls.filter(([name]) => name === 'submit_generation').length;
+  const prompt = find('.composer-prompt-input');
+  prompt.fire('keydown', { key: 'Enter' }); await flush();
+  prompt.fire('keydown', { key: 'Enter', metaKey: true, isComposing: true }); await flush();
+  assert.equal(submits(), 0);
+  let prevented = false;
+  prompt.fire('keydown', { key: 'Enter', metaKey: true, preventDefault() { prevented = true; } }); await flush(); await flush();
+  assert.equal(prevented, true);
+  assert.equal(submits(), 1);
+  prompt.fire('keydown', { key: 'Enter', ctrlKey: true }); await flush(); await flush();
+  assert.equal(submits(), 1, 'a submitted draft is never sent again');
+});
+
+test('the keyboard shortcut respects the same blocks as the Generate button', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { view, find, backend } = mountComposerView(); t.after(() => view.destroy());
+  const data = initial(); data.validation.errors = [{ path: 'prompt', message: '请输入生成内容', kind: 'missing' }]; view.render(result(data));
+  find('.composer-prompt-input').fire('keydown', { key: 'Enter', metaKey: true }); await flush(); await flush();
+  assert.equal(backend.calls.filter(([name]) => name === 'submit_generation').length, 0);
+});
+
+test('enumerated settings are direct choices that save to the shared draft', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { view, find, backend } = mountComposerView(); t.after(() => view.destroy());
+  const data = initial(); data.model = { ...data.model, parameters: { ratio: { type: 'string', optional: true, default: '16:9', enum: ['16:9', '9:16', '1:1'] } } };
+  backend.replace(data); view.render(result(data));
+  view.setHostContext({ displayMode: 'fullscreen', availableDisplayModes: ['inline', 'fullscreen'] });
+  const segments = find('.composer-common').querySelectorAll('.composer-segment');
+  assert.deepEqual(segments.map(node => node.textContent), ['16:9', '9:16', '1:1']);
+  assert.equal(segments[0].attributes['aria-checked'], 'true', 'the declared default is shown as the current choice');
+  segments[1].click(); t.mock.timers.tick(650); await flush();
+  assert.deepEqual(backend.data.draft.parameters, { ratio: '9:16' });
+  assert.equal(backend.calls.filter(([name]) => name === 'submit_generation').length, 0);
+});
+
+test('dropped or pasted files map only to a media type the selected model accepts', () => {
+  const inputs = [{ type: 'text' }, { type: 'image' }, { type: 'video' }];
+  assert.equal(composer.referenceTypeForFile({ type: 'image/png' }, inputs), 'image');
+  assert.equal(composer.referenceTypeForFile({ type: 'video/mp4' }, inputs), 'video');
+  assert.throws(() => composer.referenceTypeForFile({ type: 'audio/mpeg' }, inputs), /不支持/);
+  assert.throws(() => composer.referenceTypeForFile({ type: 'image/svg+xml' }, inputs), /不支持/);
+  assert.throws(() => composer.referenceTypeForFile({ type: '' }, inputs), /不支持/);
+});
+
+test('a required media role is preset only when the next one is unambiguous', () => {
+  const frames = { type: 'image', roles: ['first_frame', 'last_frame'], roleRequired: true };
+  assert.equal(composer.defaultRoleFor(frames, []), 'first_frame');
+  assert.equal(composer.defaultRoleFor(frames, [{ type: 'image', meta: { role: 'first_frame' } }]), 'last_frame');
+  assert.equal(composer.defaultRoleFor(frames, [{ type: 'image', meta: { role: 'first_frame' } }, { type: 'image', meta: { role: 'last_frame' } }]), undefined);
+  assert.equal(composer.defaultRoleFor({ type: 'video', roles: ['reference_video'], roleRequired: true }, []), 'reference_video');
+  assert.equal(composer.defaultRoleFor({ type: 'image', roles: ['first_frame', 'reference_image'] }, []), undefined, 'optional roles stay unset');
+  assert.equal(composer.defaultRoleFor({ type: 'image' }, []), undefined);
+});
+
+test('price summary estimates per-second video cost from the chosen duration and labels other units plainly', () => {
+  const duration = { duration: { type: 'integer', default: 5, min: 1, max: 15 } };
+  assert.deepEqual(composer.priceSummary({ unit: 'second', amount: 0.04 }, duration, {}), { estimate: '≈ $0.20', unit: '$0.04/秒' });
+  assert.deepEqual(composer.priceSummary({ unit: 'second', min: 0.126, max: 0.168 }, duration, { duration: 10 }), { estimate: '≈ $1.26–1.68', unit: '$0.126–0.168/秒' });
+  assert.deepEqual(composer.priceSummary({ unit: 'image', amount: 0.01 }, {}, {}), { estimate: null, unit: '$0.01/张' });
+  assert.deepEqual(composer.priceSummary({ unit: '1m_tokens', amount: 140 }, {}, {}), { estimate: null, unit: '$140/百万 tokens' });
+  assert.deepEqual(composer.priceSummary({ unit: 'second', amount: 0.1 }, { duration: { type: 'integer', min: -1, max: 30 } }, { duration: -1 }), { estimate: null, unit: '$0.10/秒' });
+  assert.equal(composer.priceSummary(undefined, {}, {}), null);
+});
+
+test('aspect ratios come from declared ratio or size values and never from guesses', () => {
+  assert.equal(composer.aspectOf('16:9'), 16 / 9);
+  assert.equal(composer.aspectOf('1536x1024'), 1.5);
+  assert.equal(composer.aspectOf('768*1344'), 768 / 1344);
+  for (const value of ['auto', 'adaptive', '768P', '', undefined, '0:9', '16:0']) assert.equal(composer.aspectOf(value), null);
+});
+
+test('a save rejected for an old revision loads the newer draft at once and asks how to continue', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const calls = [];
+  const session = createDraftSession({ callTool: async name => {
+    calls.push(name);
+    if (name === 'update_generation_draft') return { isError: true, content: [{ type: 'text', text: 'REVISION_CONFLICT: 内容已更新，请读取最新草稿后合并。' }], _meta: { code: 'REVISION_CONFLICT', currentRevision: 2 } };
+    const data = initial(); data.draft.revision = 2; data.draft.prompt = 'Agent edit'; return result(data);
+  } });
+  session.receive(result(initial())); session.edit({ prompt: 'Mine' });
+  await assert.rejects(() => session.save(), /内容已更新/);
+  await flush();
+  assert.deepEqual(calls, ['update_generation_draft', 'read_generation_draft'], 'no 4 second wait for the next poll');
+  assert.equal(session.state().conflict.draft.revision, 2);
+  assert.equal(session.state().local.prompt, 'Mine');
+  assert.doesNotMatch(session.state().error, /REVISION_CONFLICT/);
+  assert.equal(calls.filter(name => name === 'submit_generation').length, 0);
+  session.destroy();
 });

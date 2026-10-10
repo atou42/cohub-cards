@@ -46,7 +46,7 @@ export function createGenerationService({execute=runCohub,store=createDraftStore
       draft.taskRunId?readCard({kind:'generation',spaceId:draft.spaceId,id:draft.taskRunId}):null,
     ]);
     return {kind:'composer',draft,model,catalog:models,generation,
-      validation:model?validateDraft(fields(draft),model):{errors:[{path:'model',message:'请选择生成模型'}]},
+      validation:model?validateDraft(fields(draft),model):{errors:[{path:'model',message:'请选择生成模型',kind:'missing'}]},
       limitations:model?limitationsFor(model):[]};
   }
   async function prepare(input) {

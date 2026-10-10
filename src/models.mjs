@@ -64,13 +64,15 @@ function fieldErrors(v,s){
 }
 export function validateDraft(draft,model){
  declaration(model,model?.model);const errors=[];const add=(path,message)=>errors.push({path,message});
+ // Missing input is a next step for the person, not a broken value.
+ const need=(path,message)=>errors.push({path,message,kind:'missing'});
  if(!object(draft))return {errors:[{path:'draft',message:'草稿必须为对象'}]};
  for(const key of Object.keys(draft))if(!['model','prompt','media','parameters','meta'].includes(key))add(key,'不支持的草稿字段');
  if(draft.model!==model.model)add('model','模型不匹配');if(typeof draft.prompt!=='string')add('prompt','请输入文字');
- const inputs=model.content.input;const text=inputs.find(s=>s.type==='text');if(text?.required&&(typeof draft.prompt!=='string'||!draft.prompt.trim()))add('prompt','请输入生成内容');
+ const inputs=model.content.input;const text=inputs.find(s=>s.type==='text');if(text?.required&&(typeof draft.prompt!=='string'||!draft.prompt.trim()))need('prompt','请输入生成内容');
  if(!text&&draft.prompt)add('prompt','此模型不接受文字');
  const media=Array.isArray(draft.media)?draft.media:[];if(!Array.isArray(draft.media))add('media','素材列表缺失');
- for(const spec of inputs.filter(s=>s.type!=='text')){const count=media.filter(m=>m?.type===spec.type).length;const min=spec.min??(spec.required?1:0);if(count<min)add('media',`${spec.type} 至少需要 ${min} 个`);if(spec.max!==undefined&&count>spec.max)add('media',`${spec.type} 最多 ${spec.max} 个`);}
+ for(const spec of inputs.filter(s=>s.type!=='text')){const count=media.filter(m=>m?.type===spec.type).length;const min=spec.min??(spec.required?1:0);if(count<min)need('media',`${spec.type} 至少需要 ${min} 个`);if(spec.max!==undefined&&count>spec.max)add('media',`${spec.type} 最多 ${spec.max} 个`);}
  media.forEach((m,i)=>{
   const path=`media.${i}`;if(!object(m)){add(path,'素材格式错误');return;}
   for(const key of Object.keys(m))if(!['type','source','meta'].includes(key))add(`${path}.${key}`,'不支持的素材字段');
@@ -87,18 +89,18 @@ export function validateDraft(draft,model){
   }else add(`${path}.source.type`,'只支持上传文件或链接');
   if(m.meta!==undefined&&!object(m.meta))add(`${path}.meta`,'素材设置必须为对象');
   if(object(m.meta))for(const key of Object.keys(m.meta))if(key!=='role')add(`${path}.meta.${key}`,'当前官方 CLI 不支持此素材字段，不能提交');
-  const role=m.meta?.role;if(spec?.roleRequired&&!role)add(`${path}.meta.role`,'请选择素材用途');if(role!==undefined&&(!spec?.roles?.includes(role)||typeof role!=='string'))add(`${path}.meta.role`,'模型不支持此素材用途');
+  const role=m.meta?.role;if(spec?.roleRequired&&!role)need(`${path}.meta.role`,'请选择素材用途');if(role!==undefined&&(!spec?.roles?.includes(role)||typeof role!=='string'))add(`${path}.meta.role`,'模型不支持此素材用途');
  });
  for(const [section,specs] of [['parameters',model.parameters??{}],['meta',model.meta?.fields??{}]]){
   const value=draft[section];if(!object(value)){add(section,'字段必须为对象');continue;}
   for(const [key,v] of Object.entries(value)){const spec=specs[key];if(!spec){add(`${section}.${key}`,'模型未声明此字段');continue;}for(const message of fieldErrors(v,spec))add(`${section}.${key}`,message);}
-  for(const [key,spec] of Object.entries(specs))if(spec.optional!==true&&spec.default===undefined&&value[key]===undefined)add(`${section}.${key}`,'必填字段缺失');
+  for(const [key,spec] of Object.entries(specs))if(spec.optional!==true&&spec.default===undefined&&value[key]===undefined)need(`${section}.${key}`,'必填字段缺失');
  }
  const roles=media.map(m=>m?.meta?.role);const frame=roles.some(r=>['first_frame','last_frame'].includes(r));const reference=roles.some(r=>['reference_image','reference_video','reference_audio'].includes(r));
  if(frame&&reference)add('media','首尾帧不能与参考素材混用');for(const role of ['first_frame','last_frame'])if(roles.filter(r=>r===role).length>1)add('media',`${role} 只能有一个`);
  if(['seedance-2-0','seedance-2-0-fast'].includes(model.model)&&media.some(m=>m?.type==='audio')&&!media.some(m=>['image','video'].includes(m?.type)))add('media','此模型的参考音频还需要图片或视频');
  if(model.model.startsWith('seedance-')&&(frame||media.some(m=>m?.type==='video'))){const ratio=draft.parameters?.ratio??model.parameters?.ratio?.default;if(ratio!==undefined&&ratio!=='adaptive')add('parameters.ratio','首尾帧或参考视频需要 adaptive 比例');}
- if(model.model==='qwen-audio-3.0-tts-plus'){if(typeof draft.prompt==='string'&&[...draft.prompt].length<15)add('prompt','语音文本至少需要 15 个字符');if(media.some(m=>m?.type==='audio')&&draft.meta?.voice_prompt!==undefined)add('meta.voice_prompt','参考音频和声音描述不能同时使用');}
+ if(model.model==='qwen-audio-3.0-tts-plus'){if(typeof draft.prompt==='string'&&draft.prompt.trim()&&[...draft.prompt].length<15)add('prompt','语音文本至少需要 15 个字符');if(media.some(m=>m?.type==='audio')&&draft.meta?.voice_prompt!==undefined)add('meta.voice_prompt','参考音频和声音描述不能同时使用');}
  if(model.model==='higgs-tts'&&media.filter(m=>m?.type==='audio').length>1)add('media','多音色混合需要权重，当前官方 CLI 暂不支持；可使用默认音色或一条参考音频');
  return {errors};
 }

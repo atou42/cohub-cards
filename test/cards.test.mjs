@@ -56,3 +56,9 @@ test('upstream network and JSON errors propagate without becoming empty successf
   const cause=new Error('CLI failed');const reader=createReader(async()=>{throw cause;});
   await assert.rejects(()=>reader({kind:'generation',...query}),error=>error===cause);
 });
+test('task times pass through only when they are real dates',()=>{
+  const card=generationCard({run:{...run,createdAt:'2026-10-09T15:07:38.730Z',startedAt:'2026-10-09T15:07:38.735Z',finishedAt:null}},query);
+  assert.equal(card.createdAt,'2026-10-09T15:07:38.730Z');assert.equal(card.startedAt,'2026-10-09T15:07:38.735Z');assert.equal(card.finishedAt,undefined);
+  assert.equal(generationCard({run},query).startedAt,undefined);
+  assert.throws(()=>generationCard({run:{...run,startedAt:'yesterday'}},query));
+});

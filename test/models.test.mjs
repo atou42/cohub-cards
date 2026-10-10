@@ -72,3 +72,14 @@ test('all official request examples pass except explicitly unsupported weighted 
   else assert.deepEqual(errors,[],`${m.model}: ${ex.title}`);
  }
 });
+test('missing inputs are marked as still needed, while invalid values stay plain errors',()=>{
+ assert.deepEqual(check('noobxl',{prompt:''}),[{path:'prompt',message:'请输入生成内容',kind:'missing'}]);
+ assert.ok(check('minimax-h3-max-turbo',{media:[media('image')]}).some(e=>e.path==='media.0.meta.role'&&e.kind==='missing'));
+ assert.ok(check('birefnet-general',{prompt:''}).some(e=>e.path==='media'&&e.kind==='missing'));
+ const invalid=check('noobxl',{parameters:{size:'tiny'}});
+ assert.ok(invalid.length);assert.ok(invalid.every(e=>e.kind===undefined));
+});
+test('an empty speech draft only asks for text; a short non-empty text is still rejected',()=>{
+ assert.deepEqual(check('qwen-audio-3.0-tts-plus',{prompt:''}),[{path:'prompt',message:'请输入生成内容',kind:'missing'}]);
+ assert.ok(check('qwen-audio-3.0-tts-plus',{prompt:'短句'}).some(e=>e.message.includes('15')&&e.kind===undefined));
+});
