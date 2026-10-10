@@ -2,7 +2,7 @@ import { App } from "@modelcontextprotocol/ext-apps";
 import { mountCard } from "./card.js";
 import { mountComposer } from "./composer.js";
 
-const app = new App({ name: "Cohub", version: "0.4.0" }, { availableDisplayModes: ["inline", "fullscreen"] }, { autoResize: true });
+const app = new App({ name: "Cohub", version: "0.5.0" }, { availableDisplayModes: ["inline", "fullscreen"] }, { autoResize: true });
 const root = document.getElementById("cohub-card");
 const transport = {
   callTool: (name, args) => app.callServerTool({ name, arguments: args }),

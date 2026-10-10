@@ -6,7 +6,11 @@
 
 默认显示精简聊天卡。`web/composer.js` 根据宿主 `displayMode` 切换布局，不根据窗口宽度猜测位置。展开调用标准 `requestDisplayMode({mode:"fullscreen"})`，当前 Codex 将它放到右侧面板；返回请求 `inline`。两个布局保留同一个表单、输入和草稿。宿主拒绝或报错时保持实际模式并显示错误，不另开浏览器冒充展开。
 
-`prepare_generation` 创建草稿并附上编辑器。后续 `read_generation_draft`、`update_generation_draft`、`add_generation_reference`、`submit_generation` 由用户界面和 Agent 共用，不重复附加卡片资源。
+`prepare_generation` 创建草稿并附上编辑器。`read_generation_draft`、`update_generation_draft`、`add_generation_reference` 由界面和 Agent 共用。用户确认走 app-only `confirm_generation`，取消走 app-only `cancel_generation`，不通过 `sendMessage` 触发新一轮模型回复。`submit_generation` 保留给获得明确文字授权的 Agent；app-only 可见性由宿主管理，不是独立鉴权边界。
+
+`brief` 保存方案和产出说明，其余字段直接组成完整确认页。确认请求带当前草稿与完整模型声明的 SHA-256 `reviewToken`，服务端读取新模型声明后再次核对，避免悄悄提交未展示的报价或默认值。`reviewPaused` 不能通过普通编辑清除。
+
+`continuationDraftIds` 只关联最多 19 份已准备的同空间独立草稿。用户选择后，由一次 app-only 调用按稳定顺序锁定所有草稿，校验每份版本、token 与预计费用预算，再逐个提交。`batchReview` 保存一次确认的范围与停止结果，不是后台队列。原子替换仅针对单份文件，多文件写入失败会保留已有状态并报错，不自动重建或恢复。提交结果不明不重试；未尝试的子草稿恢复为暂停草稿。范围价格、未知数量或计费单位不能假装为零，按明确原因禁止自动批次。
 
 `src/drafts.mjs` 每份草稿保存一个 JSON 文件，使用版本检查、独占文件锁和原子替换。更新必须带当前 `baseRevision`；冲突返回明确错误，不能覆盖新内容。坏文件和现存锁不自动清理。状态目录独立于插件版本缓存，默认 `~/.local/state/cohub-cards`，支持 `COHUB_CARDS_STATE_DIR` 和 `XDG_STATE_HOME`。
 

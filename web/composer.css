@@ -133,6 +133,39 @@
 /* ---------- Expanded panel ---------- */
 .composer-panel { padding: 0 20px 12px; }
 .composer-panel[hidden] { display: none; }
+
+/* A complete, editable brief beside the action, without a new chat message. */
+.composer-review { border-top: 1px solid var(--line); padding: 14px 16px; }
+.composer-review[hidden], .review-batch[hidden], .review-batch-options[hidden], .review-cancel[hidden] { display: none; }
+.review-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.review-heading h2 { margin: 0; font: 600 13px/20px var(--font-sans); color: var(--ink); }
+.review-caption { font: 11px/16px var(--font-sans); color: var(--ink-3); text-align: right; }
+.review-summary { font: 500 14px/21px var(--font-sans); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-scope { margin-top: 5px; font: 12px/18px var(--font-sans); color: var(--ink-3); overflow-wrap: anywhere; }
+.review-details { margin-top: 12px; }
+.review-details > summary, .review-item-details > summary { cursor: pointer; color: var(--ink-2); font: 500 12px/20px var(--font-sans); padding: 3px 0; }
+.review-details > summary:focus-visible, .review-item-details > summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; border-radius: 4px; }
+.review-brief-fields { display: grid; gap: 10px; margin: 12px 0; }
+.review-field { display: grid; gap: 5px; color: var(--ink-2); font: 12px/18px var(--font-sans); }
+.review-field textarea, .review-field input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; color: var(--ink); background: var(--field); font: 13px/20px var(--font-sans); }
+.review-field textarea { resize: vertical; min-height: 60px; max-height: 220px; }
+.review-field input:focus, .review-field textarea:focus { outline: 2px solid var(--brand-ring); border-color: var(--brand-line); }
+.review-row { margin: 10px 0; }
+.review-row h3 { margin: 0 0 3px; color: var(--ink-3); font: 500 11px/18px var(--font-sans); }
+.review-row p { margin: 0; color: var(--ink-2); font: 13px/20px var(--font-sans); white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-batch { margin-top: 16px; padding: 12px; background: var(--canvas); border: 1px solid var(--line); border-radius: 10px; }
+.review-auto-label, .review-choice { display: flex; align-items: flex-start; gap: 8px; font: 500 12px/20px var(--font-sans); color: var(--ink); }
+.review-auto-label input, .review-choice input { accent-color: var(--brand); flex: none; margin-top: 3px; }
+.review-choice { margin-top: 12px; }
+.review-help { color: var(--ink-3); font: 11px/17px var(--font-sans); margin: 6px 0 10px; }
+.review-item-details { margin: 4px 0 12px 24px; }
+.review-batch-total { color: var(--ink); font: 500 12px/20px var(--font-sans); margin: 8px 0 0; }
+.review-batch-problem { color: var(--ink-3); font: 12px/18px var(--font-sans); margin: 4px 0 0; }
+.review-actions { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
+@media (max-width: 420px) {
+  .review-heading { display: block; }.review-caption { display: block; text-align: left; margin-top: 2px; }
+  .composer-generate { height: auto; min-height: 32px; }.composer-generate-label { white-space: normal; }
+}
 .composer-section { padding: 16px 0; border-bottom: 1px solid var(--line); }
 .composer-section:last-child { border-bottom: 0; }
 .composer-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }

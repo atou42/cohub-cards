@@ -13,7 +13,8 @@ test('presentation has UI; refresh is app-only; tool output preserves the real r
   const {client,close}=await connect(async args=>{seen.push(args);return card;});
   try {
     const {tools}=await client.listTools();
-    assert.deepEqual(tools.map(t=>t.name),['show_generation','show_publication','read_card','prepare_generation','read_generation_draft','update_generation_draft','submit_generation','add_generation_reference']);
+    assert.deepEqual(tools.map(t=>t.name),['show_generation','show_publication','read_card','prepare_generation','read_generation_draft','update_generation_draft','submit_generation','confirm_generation','cancel_generation','add_generation_reference']);
+    for(const name of ['confirm_generation','cancel_generation'])assert.deepEqual(tools.find(t=>t.name===name)._meta.ui.visibility,['app']);
     assert.equal(tools[0]._meta.ui.resourceUri,UI_URI);assert.deepEqual(tools[2]._meta.ui.visibility,['app']);
     assert.equal(tools[2]._meta.ui.resourceUri,undefined);
     assert.equal(tools[3]._meta.ui.resourceUri,UI_URI);

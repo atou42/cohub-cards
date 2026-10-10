@@ -1,7 +1,7 @@
 import { createMediaView, createProgressView, elapsedLabel, readCardResult } from "./card.js";
 import { icon } from "./icons.js";
 
-const EDITABLE = ["title", "model", "prompt", "media", "parameters", "meta"];
+const EDITABLE = ["title", "model", "prompt", "media", "parameters", "meta", "brief", "continuationDraftIds"];
 const LIVE_GENERATION = new Set(["pending", "running"]);
 const COMMON_FIELDS = new Set(["size", "image_size", "aspect_ratio", "ratio", "duration", "resolution"]);
 const PRIMARY_FIELDS = new Set([...COMMON_FIELDS, "quality", "background", "output_format", "mode", "camera_fixed", "title", "tags", "lyrics", "make_instrumental", "voice_prompt", "negative_tags"]);
@@ -17,7 +17,7 @@ const clone = value => structuredClone(value);
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const message = error => error instanceof Error ? error.message : String(error);
-const editable = draft => Object.fromEntries(EDITABLE.map(key => [key, clone(draft[key])]));
+const editable = draft => Object.fromEntries(EDITABLE.filter(key => draft[key] !== undefined).map(key => [key, clone(draft[key])]));
 
 export function readComposerResult(result) {
   if (result?.isError) {
@@ -42,6 +42,19 @@ export function readComposerResult(result) {
     if (item.meta !== undefined && !object(item.meta)) throw new Error("Cohub 参考素材的用途格式不正确。");
   }
   if (data.generation !== null && data.generation !== undefined) readCardResult({ structuredContent: data.generation });
+  if (draft.brief !== undefined && (!object(draft.brief) || typeof draft.brief.summary !== "string" || typeof draft.brief.output !== "string")) throw new Error("方案说明格式不正确。");
+  if (draft.reviewPaused !== undefined && typeof draft.reviewPaused !== "boolean") throw new Error("方案确认状态不正确。");
+  if (draft.continuationDraftIds !== undefined && (!Array.isArray(draft.continuationDraftIds) || !draft.continuationDraftIds.every(id => typeof id === "string") || new Set(draft.continuationDraftIds).size !== draft.continuationDraftIds.length)) throw new Error("后续草稿列表不正确。");
+  if (data.review !== undefined) {
+    if (typeof data.review.token !== "string" || !/^[a-f0-9]{64}$/.test(data.review.token)) throw new Error("方案确认凭据缺失，请重新读取草稿。");
+    const validCost = cost => cost === null || (object(cost) && Number.isFinite(cost.minUsd) && Number.isFinite(cost.maxUsd) && cost.minUsd >= 0 && cost.maxUsd >= cost.minUsd);
+    if (!object(data.review) || !validCost(data.review.cost) || typeof data.review.costReason !== "string" || !Array.isArray(data.review.continuations)) throw new Error("方案费用或范围信息不完整。");
+    for (const item of data.review.continuations) {
+      if (typeof item.reviewToken !== "string" || !/^[a-f0-9]{64}$/.test(item.reviewToken)) throw new Error("后续方案确认凭据缺失。");
+      if (!validCost(item.cost) || typeof item.costReason !== "string" || !Array.isArray(item.validation?.errors)) throw new Error("后续草稿费用或范围信息不完整。");
+      readComposerResult({ structuredContent: {kind:"composer",draft:item.draft,model:item.model,catalog:[],limitations:[],validation:item.validation,generation:item.generation} });
+    }
+  }
   return data;
 }
 
@@ -159,7 +172,7 @@ export function createDraftSession(transport, onChange = () => {}) {
     const key = `${data.draft.id}:${data.draft.revision}:${data.draft.status}`;
     if (key === contextKey) return;
     contextKey = key;
-    const note = JSON.stringify({ cohubDraft: data.draft.id, revision: data.draft.revision, model: data.draft.model, status: data.draft.status, prompt: data.draft.prompt.slice(0, 160), ...(data.draft.taskRunId ? { taskRunId: data.draft.taskRunId } : {}) });
+    const note = JSON.stringify({ cohubDraft: data.draft.id, revision: data.draft.revision, model: data.draft.model, status: data.draft.status, reviewPaused:data.draft.reviewPaused===true, batchStatus:data.draft.batchReview?.status, prompt: data.draft.prompt.slice(0, 160), ...(data.draft.taskRunId ? { taskRunId: data.draft.taskRunId } : {}) });
     Promise.resolve().then(() => transport.updateModelContext(note)).then(result => {
       if (result?.isError) throw new Error("当前聊天未接收草稿上下文。");
       contextError = ""; emit();
@@ -242,7 +255,7 @@ export function createDraftSession(transport, onChange = () => {}) {
     emit();
     return savePromise;
   }
-  async function submit() {
+  async function submit(options = {}) {
     if (submitPromise) return submitPromise;
     checkEditable();
     if (operation) throw new Error("当前操作尚未完成。");
@@ -252,22 +265,40 @@ export function createDraftSession(transport, onChange = () => {}) {
       try {
         await save();
         while (dirty.size) await save();
+        const reviewedRevision = data.draft.revision;
+        const reviewedModel = JSON.stringify(data.model);
+        const reviewedCosts = JSON.stringify(data.review);
         await refresh({ force: true });
         checkEditable();
+        if (data.draft.revision !== reviewedRevision || JSON.stringify(data.model) !== reviewedModel || JSON.stringify(data.review) !== reviewedCosts) throw new Error("方案已更新，请查看最新内容后再次确认。");
         if (dirty.size || conflict) throw new Error("输入尚未保存，不能提交旧版本。");
         if (!data.draft.model) throw new Error("请先选择模型。");
         if (data.validation.errors.length) throw new Error(data.validation.errors.map(item => item.message).join("\n"));
         sent = true;
-        const result = await transport.callTool("submit_generation", { draftId: data.draft.id, baseRevision: data.draft.revision });
+        const result = await transport.callTool("confirm_generation", { ...clone(options), draftId: data.draft.id, baseRevision: data.draft.revision, reviewToken:data.review?.token });
         const next = readComposerResult(result); acknowledged = true; receive(result, { force: true });
         if (next.draft.status === "draft") throw new Error(next.draft.error || next.validation.errors.map(item => item.message).join("\n") || "草稿未提交，请检查输入。");
         return next;
       } catch (cause) {
-        if (sent && !acknowledged) uncertain = true;
+        if (sent && !acknowledged) {
+          uncertain = !["REVISION_CONFLICT","REVIEW_CHANGED"].includes(cause.code);
+          if (!uncertain) await refresh({force:true});
+        }
         fail(cause); throw cause;
       } finally { operation = ""; submitPromise = null; emit(); schedule(); }
     })();
     return submitPromise;
+  }
+  async function cancel() {
+    checkEditable();
+    if (operation) throw new Error("当前操作尚未完成。");
+    operation = "cancelling"; stop("save"); stop("poll"); emit();
+    try {
+      await save(); while (dirty.size) await save();
+      const result = await transport.callTool("cancel_generation", {draftId:data.draft.id,baseRevision:data.draft.revision});
+      receive(result, {force:true}); return data;
+    } catch (cause) { fail(cause); throw cause; }
+    finally { operation=""; emit(); schedule(); }
   }
   async function addReference(reference) {
     checkEditable();
@@ -303,7 +334,7 @@ export function createDraftSession(transport, onChange = () => {}) {
     emit(true); scheduleSave(); schedule();
   }
   return {
-    state, receive, edit, save, submit, refresh, addReference, recreate, resolveConflict, showError: fail,
+    state, receive, edit, save, submit, cancel, refresh, addReference, recreate, resolveConflict, showError: fail,
     setEditing(value) { editing = value; if (!editing && conflict && !dirty.size) adopt(conflict); else emit(); },
     setVisible(value) { visible = value; if (!value) stop("poll"); else schedule(); },
     setCapabilities(value) { capabilities = { callTool: value.callTool === true && typeof transport.callTool === "function", updateModelContext: value.updateModelContext === true }; emit(); notify(); schedule(); },
@@ -395,6 +426,14 @@ export function mountComposer(root, transport) {
       <div class="cc-rail-end"><span class="composer-save-state"></span><span class="composer-status status-pill" role="status"><span class="status-dot" aria-hidden="true"></span><span class="composer-status-label"></span></span><button type="button" class="composer-display-mode cc-button cc-button--quiet cc-button--small"></button></div>
     </header>
     <section class="composer-stage" aria-label="作品预览"></section>
+    <section class="composer-review" aria-label="确认方案">
+      <div class="review-heading"><h2>确认方案</h2><span class="review-caption">看好后直接点击生成，无需再发消息</span></div>
+      <div class="review-summary"></div><div class="review-scope"></div>
+      <details class="review-details"><summary>修改方案与查看详情</summary>
+        <div class="review-brief-fields"></div><div class="review-full"></div>
+        <div class="review-batch"></div><div class="review-actions"></div>
+      </details>
+    </section>
     <section class="composer-panel" aria-label="创作设置"><div class="composer-result-details"></div><div class="composer-common"></div><div class="composer-references"></div><div class="composer-settings"></div></section>
     <div class="composer-dock">
     <div class="composer-feedback" aria-live="polite"></div>
@@ -450,6 +489,105 @@ export function mountComposer(root, transport) {
   }
   const mediaInputs = state => state.data?.model?.content?.input.filter(item => ["image", "video", "audio"].includes(item.type)) || [];
   const canEdit = state => Boolean(capabilities.callTool && state.data && state.status === "draft" && !state.uncertain && !(state.busy && state.busy !== "saving") && !readingFile);
+
+  // Review choices stay in this card; only an explicit click submits them.
+  let reviewKey = "", batchKey = "", batchPlanKey = "", reviewDraftId = "", autoContinue = false, budget = "", selected = new Set();
+  const reviewSummary = find(".review-summary"), reviewScope = find(".review-scope"), reviewFull = find(".review-full");
+  const reviewFields = find(".review-brief-fields"), batchRoot = find(".review-batch");
+  const summaryInput = element("textarea", "review-summary-input"), outputInput = element("textarea", "review-output-input");
+  for (const [input,label,key] of [[summaryInput,"方案与风格","summary"],[outputInput,"产出说明","output"]]) {
+    const wrap=element("label","review-field");wrap.append(element("span","",label),input);
+    input.rows=2;input.setAttribute("aria-label",label);input.placeholder=key==="summary"?"描述创作方向、风格和用途":"说明这次会得到什么";
+    input.addEventListener("input",()=>editNow(()=>session.edit({brief:{summary:summaryInput.value,output:outputInput.value}})));
+    reviewFields.append(wrap);
+  }
+  const cancelButton=button("取消，保留草稿",()=>session.cancel(),"review-cancel cc-button cc-button--quiet cc-button--small");
+  find(".review-actions").append(cancelButton);
+  const costText=cost=>cost ? (cost.minUsd===cost.maxUsd?`预计 $${money(cost.maxUsd)}`:`预计 $${money(cost.minUsd)}–${money(cost.maxUsd)}`) : "预计费用未知";
+  function appendReview(target,draft,model,cost,reason,includeBrief=true) {
+    const row=(title,text)=>{const group=element("div","review-row");group.append(element("h3","",title),element("p","",text));target.append(group);};
+    if(includeBrief){row("方案",draft.brief?.summary || "尚未填写创作说明");row("产出",draft.brief?.output || "本次提交 1 个生成任务；具体产出以模型说明为准");}
+    row("完整提示词",draft.prompt || "尚未填写提示词");
+    row("模型",model?.title || draft.model || "尚未选择模型");
+    const settings=fieldDefinitions(model).flatMap(({scope,key,schema})=>{
+      const value=draft[scope][key] ?? schema.default;
+      return value===undefined?[]:[`${key==="n"?"数量":LABELS[key]||key}：${typeof value==="object"?JSON.stringify(value):valueLabel(key,value)}`];
+    });
+    row("本次设置",settings.length?settings.join("\n"):"使用模型默认设置");
+    row("参考素材",draft.media.length?draft.media.map((item,index)=>`${index+1}. ${TYPE_LABELS[item.type]} · ${ROLE_LABELS[item.meta?.role]||item.meta?.role||"默认用途"}\n${item.source.type==="url"?item.source.url:`${item.source.name}（确认生成时上传）`}`).join("\n\n"):"无");
+    row("预计费用",`${costText(cost)} · ${reason || "实际费用以 Cohub 记录为准"}`);
+  }
+  function selectedEntries(state) {
+    return (state.data?.review?.continuations||[]).filter(item=>selected.has(item.draft.id));
+  }
+  function batchProblem(state) {
+    if (!autoContinue || state.status!=="draft") return "";
+    const items=selectedEntries(state);
+    if (!items.length) return "请选择本次允许继续的草稿。";
+    if (!state.data.review?.cost || items.some(item=>!item.cost)) return "费用无法可靠估算，请逐项确认。";
+    if (items.some(item=>item.draft.status!=="draft" || item.draft.reviewPaused || item.validation.errors.length)) return "选中的草稿尚未就绪，请先修改或逐项确认。";
+    const limit=Number(budget), total=state.data.review.cost.maxUsd+items.reduce((sum,item)=>sum+item.cost.maxUsd,0);
+    if (!budget.trim() || !Number.isFinite(limit) || limit<=0) return "请填写本次预计费用预算。";
+    if (total>limit+1e-9) return `所选方案预计最多 $${money(total)}，超过填写的预算。`;
+    return "";
+  }
+  function confirmationOptions() {
+    const state=session.state(), problem=batchProblem(state);
+    if (problem) throw new Error(problem);
+    return autoContinue?{continuations:selectedEntries(state).map(item=>({draftId:item.draft.id,baseRevision:item.draft.revision,reviewToken:item.reviewToken})),budgetUsd:Number(budget)}:{};
+  }
+  function drawReview(state) {
+    const root=find(".composer-review"), draft=state.data?.draft;
+    root.hidden=!draft;
+    if (!draft) return;
+    const local=state.local, review=state.data.review;
+    if (reviewDraftId!==draft.id) {reviewDraftId=draft.id;autoContinue=false;budget="";selected.clear();batchPlanKey="";batchKey="";}
+    const planKey=JSON.stringify((review?.continuations||[]).map(item=>[item.draft.id,item.reviewToken]));
+    if (batchPlanKey && batchPlanKey!==planKey && state.status==="draft") {autoContinue=false;selected.clear();batchKey="";}
+    batchPlanKey=planKey;
+    find(".review-caption").textContent=state.status==="draft" ? "看好后直接点击生成，无需再发消息" : "本次提交的方案与记录";
+    reviewSummary.textContent=local.brief?.summary || local.title || "请查看本次创作内容";
+    reviewScope.textContent=`${local.brief?.output || "本次提交 1 个生成任务"} · ${state.dirty.length?"保存后更新费用":costText(review?.cost)}${draft.reviewPaused?" · 已取消，草稿已保留":""}`;
+    if (doc.activeElement!==summaryInput) summaryInput.value=local.brief?.summary || "";
+    if (doc.activeElement!==outputInput) outputInput.value=local.brief?.output || "";
+    summaryInput.disabled=outputInput.disabled=!canEdit(state);
+    cancelButton.hidden=state.status!=="draft" || draft.reviewPaused===true;
+    cancelButton.disabled=!canEdit(state) || Boolean(state.conflict);
+    const key=JSON.stringify([local,state.data.model,review?.cost,review?.costReason,state.dirty]);
+    if (key!==reviewKey) {reviewKey=key;reviewFull.replaceChildren();appendReview(reviewFull,local,state.data.model,state.dirty.length?null:review?.cost,state.dirty.length?"草稿正在保存，费用稍后更新":review?.costReason||"费用无法可靠估算",false);}
+    const nextBatchKey=JSON.stringify([draft.id,review?.continuations,state.status,canEdit(state)]);
+    if (nextBatchKey!==batchKey) {
+      const before=JSON.stringify([...selected]);
+      const entries=review?.continuations||[];
+      selected=new Set([...selected].filter(id=>entries.some(item=>item.draft.id===id)));
+      // A changed remote plan never retains an old batch confirmation.
+      if (batchKey && before!==JSON.stringify([...selected])) autoContinue=false;
+      batchKey=nextBatchKey;batchRoot.replaceChildren();batchRoot.hidden=!entries.length;
+      if (entries.length) {
+        const autoLabel=element("label","review-auto-label"), toggle=element("input","review-auto");toggle.type="checkbox";toggle.checked=autoContinue;toggle.disabled=!canEdit(state);
+        autoLabel.append(toggle,element("span","","本次任务内自动继续"));batchRoot.append(autoLabel);
+        batchRoot.append(element("p","review-help","只按顺序提交下方勾选的独立草稿。不包含临时新增步骤；关闭卡片前请等待提交结果。"));
+        const options=element("div","review-batch-options");options.hidden=!autoContinue;
+        for (const item of entries) {
+          const choice=element("label","review-choice"), checkbox=element("input","review-choice-input");checkbox.type="checkbox";checkbox.checked=selected.has(item.draft.id);checkbox.disabled=!canEdit(state);checkbox.dataset.draftId=item.draft.id;
+          choice.append(checkbox,element("span","",`${item.draft.title||item.draft.brief?.summary||"后续草稿"} · ${costText(item.cost)} · ${item.draft.reviewPaused?"已取消":item.draft.status==="draft"?"待确认":item.draft.status==="submitted"?"已提交":"提交待核实"}`));
+          options.append(choice);
+          const details=element("details","review-item-details");details.append(element("summary","","查看这份草稿的完整方案"));appendReview(details,item.draft,item.model,item.cost,item.costReason);options.append(details);
+          checkbox.addEventListener("change",()=>{if(checkbox.checked)selected.add(item.draft.id);else selected.delete(item.draft.id);draw(stateFromSession());});
+        }
+        const budgetLabel=element("label","review-field"), budgetInput=element("input","review-budget");budgetInput.type="number";budgetInput.min="0.0001";budgetInput.step="any";budgetInput.value=budget;budgetInput.disabled=!canEdit(state);budgetInput.setAttribute("aria-label","预计费用预算（USD）");
+        budgetLabel.append(element("span","","预计费用预算（USD）"),budgetInput);options.append(budgetLabel);
+        options.append(element("p","review-help","按当前报价上限合计检查预算，实际扣费以 Cohub 为准。报价未知或方案变化时停止。"));
+        options.append(element("p","review-batch-total"));options.append(element("p","review-batch-problem"));batchRoot.append(options);
+        toggle.addEventListener("change",()=>{autoContinue=toggle.checked;options.hidden=!autoContinue;draw(stateFromSession());});
+        budgetInput.addEventListener("input",()=>{budget=budgetInput.value;draw(stateFromSession());});
+      }
+    }
+    const problem=find(".review-batch-problem"), total=find(".review-batch-total");
+    if(problem)problem.textContent=batchProblem(state);
+    if(total){const items=selectedEntries(state);total.textContent=`本次共 ${items.length+1} 个任务${review?.cost&&items.every(item=>item.cost)?` · 预计最多 $${money(review.cost.maxUsd+items.reduce((sum,item)=>sum+item.cost.maxUsd,0))}`:" · 预计总费用未知"}`;}
+  }
+  const stateFromSession=()=>session.state();
 
   // ---------- Prompt ----------
   const prompt = element("textarea", "composer-prompt-input");
@@ -969,6 +1107,7 @@ export function mountComposer(root, transport) {
     for (const text of [...new Set(missing.map(missingHint))].slice(0, 3)) add(text, "hint");
     if (state.status === "draft") for (const limitation of state.data?.limitations || []) add(limitation, "hint");
     if (state.contextError) add(state.contextError, "hint");
+    if (state.data?.draft.batchReview?.status === "stopped") add(`所选任务已停止：${state.data.draft.batchReview.error || "请查看各草稿的提交记录"}。尚未提交的草稿已保留。`, "error");
     if (state.conflict && state.dirty.length) {
       actions.push("remote");
       if (state.conflict.draft.status === "draft") actions.push("local");
@@ -1013,7 +1152,7 @@ export function mountComposer(root, transport) {
     renderModels(state);
     const nextMediaKey = JSON.stringify([state.data?.model?.model, state.local?.media, mediaInputs(state), canEdit(state)]);
     if (nextMediaKey !== mediaFormKey) { mediaFormKey = nextMediaKey; renderReferences(state); }
-    drawStage(state); drawResultDetails(state); drawFeedback(state);
+    drawStage(state); drawResultDetails(state); drawFeedback(state); drawReview(state);
 
     const generation = state.data?.generation;
     const generating = LIVE_GENERATION.has(generation?.status);
@@ -1026,6 +1165,7 @@ export function mountComposer(root, transport) {
       : terminal ? (generation.status === "failed" ? ["生成失败", "error"] : ["已完成", "done"])
       : state.status === "submitted" ? ["已提交", "live"]
       : state.conflict ? ["有新版本", "warn"]
+      : state.data?.draft.reviewPaused ? ["已取消", "quiet"]
       : state.data ? ["草稿", "quiet"] : ["等待草稿", "quiet"];
     find(".composer-status-label").textContent = statusText;
     find(".composer-status").dataset.tone = tone;
@@ -1057,11 +1197,13 @@ export function mountComposer(root, transport) {
     priceNode.hidden = !priceNode.textContent;
 
     const submitting = state.busy === "submitting" || state.status === "submitting";
-    primaryLabel.textContent = terminal ? "再创作" : submitting ? "正在提交…" : state.status === "submitted" ? "生成中…" : "生成";
+    primaryLabel.textContent = terminal ? "再创作" : submitting ? "正在提交…" : state.status === "submitted" ? "生成中…" : autoContinue ? "确认并继续所选任务" : "确认并生成";
     kbd.textContent = isMac() ? "⌘↵" : "Ctrl ↵";
     kbd.hidden = terminal || state.status !== "draft" || submitting;
     primary.title = terminal ? "用同样的设置开一份新草稿" : state.status === "draft" ? `生成（${isMac() ? "⌘" : "Ctrl"} + Enter）` : "";
     primary.disabled = !capabilities.callTool || !state.data || Boolean(state.busy && state.busy !== "saving") || readingFile || state.uncertain || Boolean(state.conflict) || invalid.size > 0 || (!terminal && (state.status !== "draft" || !state.local?.model || state.data.validation.errors.length > 0));
+    if (state.data?.draft.batchReview?.status === "stopped" && !terminal) primary.disabled=true;
+    if (!terminal && (state.dirty.length || state.busy === "saving" || batchProblem(state))) primary.disabled=true;
     primary.classList.toggle("is-busy", submitting);
 
     shell.dataset.layout = layout;
@@ -1095,12 +1237,12 @@ export function mountComposer(root, transport) {
       if (!destroyed) displayError = `${target === "fullscreen" ? "无法展开编辑" : "无法返回聊天"}：${message(cause)}`;
     } finally { if (!destroyed) { changingDisplayMode = false; stageKey = ""; draw(session.state()); } }
   });
-  primary.addEventListener("click", () => handle(() => session.state().status === "submitted" ? session.recreate() : session.submit()));
+  primary.addEventListener("click", () => handle(() => session.state().status === "submitted" ? session.recreate() : session.submit(confirmationOptions())));
   function shortcut(event) {
     if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey) || event.isComposing || event.keyCode === 229) return;
     event.preventDefault();
     if (primary.disabled || session.state().status !== "draft") return;
-    handle(() => session.submit());
+    handle(() => session.submit(confirmationOptions()));
   }
   function rootShortcut(event) { if (!event.defaultPrevented) shortcut(event); }
   function focusChanged() {

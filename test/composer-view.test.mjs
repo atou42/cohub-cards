@@ -4,8 +4,81 @@ import { createDraftSession, fieldDefinitions, parseFieldValue, readComposerResu
 import * as composer from '../web/composer.js';
 
 const model = { model: 'example-image', title: 'Example image', category: 'image', content: { input: [{ type: 'text', required: true }, { type: 'image', sources: ['url'], roles: ['first_frame', 'last_frame'] }] }, parameters: { duration: { type: 'integer', optional: true, min: 1, max: 15, default: 5 } }, meta: { fields: { lyrics: { type: 'string', optional: true }, settings: { type: 'object', optional: true } } } };
-const initial = () => ({ kind: 'composer', draft: { id: 'draft-1', spaceId: 'space-1', revision: 1, title: '创作', model: model.model, prompt: 'Original', media: [], parameters: {}, meta: {}, status: 'draft' }, model, catalog: [{ model: model.model, title: model.title, category: 'image' }], generation: null, validation: { errors: [] }, limitations: [] });
+const initial = () => ({ kind: 'composer', draft: { id: 'draft-1', spaceId: 'space-1', revision: 1, title: '创作', model: model.model, prompt: 'Original', media: [], parameters: {}, meta: {}, status: 'draft' }, model, catalog: [{ model: model.model, title: model.title, category: 'image' }], generation: null, validation: { errors: [] }, limitations: [], review:{token:'a'.repeat(64),cost:null,costReason:'费用未知',continuations:[]} });
+const TOKEN='a'.repeat(64);
 const result = data => ({ structuredContent: structuredClone(data) });
+
+test('confirmation never submits a draft changed after the person reviewed it', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const backend = server(), session = createDraftSession(backend); t.after(() => session.destroy());
+  session.receive(result(backend.data));
+  const changed = initial(); changed.draft.revision = 2; changed.draft.prompt = 'Unseen paid request'; backend.replace(changed);
+  await assert.rejects(() => session.submit(), /方案已更新/);
+  assert.equal(backend.calls.filter(([name]) => /^(submit|confirm)_generation$/.test(name)).length, 0);
+  assert.equal(session.state().local.prompt, 'Unseen paid request');
+});
+
+test('review renders full prompt, plan, references, defaults and unknown cost without another chat turn', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const {view,find,backend}=mountComposerView({sendMessage:()=>assert.fail('confirmation must not send a prompt')}); t.after(()=>view.destroy());
+  const data=initial(); data.draft.brief={summary:'清晨海岸，柔和自然光',output:'一张横版封面'};
+  data.draft.revision=2;
+  data.draft.media=[{type:'image',source:{type:'url',url:'https://example.com/coast.png'},meta:{role:'first_frame'}}];
+  data.review={token:TOKEN,cost:null,costReason:'费用无法可靠估算',continuations:[]};
+  backend.replace(data);view.render(result(data));
+  const review=find('.composer-review');
+  assert.match(review.textContent,/清晨海岸/);assert.match(review.textContent,/一张横版封面/);
+  assert.match(review.textContent,/Original/);assert.match(review.textContent,/首帧/);
+  assert.match(review.textContent,/https:\/\/example.com\/coast.png/);assert.match(review.textContent,/5 秒/);
+  assert.match(review.textContent,/费用无法可靠估算/);assert.equal(find('.composer-generate-label').textContent,'确认并生成');
+});
+
+test('cancelling saves edits and pauses the existing draft without generating or sending a message', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const backend=server();const session=createDraftSession(backend);t.after(()=>session.destroy());
+  session.receive(result(backend.data));session.edit({prompt:'Keep my draft'});
+  await session.cancel();
+  assert.equal(backend.data.draft.prompt,'Keep my draft');assert.equal(backend.data.draft.reviewPaused,true);
+  assert.equal(backend.calls.filter(([name])=>/^(submit|confirm)_generation$/.test(name)).length,0);
+});
+
+test('batch confirmation sends only selected reviewed revisions and the entered estimate budget', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const backend=server(), data=initial();
+  const next=initial();next.draft.id='next-draft';next.draft.revision=3;
+  data.draft.continuationDraftIds=['next-draft'];
+  data.review={token:TOKEN,cost:{minUsd:0.1,maxUsd:0.2},costReason:'',continuations:[{reviewToken:TOKEN,draft:next.draft,model:next.model,cost:{minUsd:0.2,maxUsd:0.4},costReason:'',validation:{errors:[]},generation:null}]};
+  backend.replace(data);const session=createDraftSession(backend);t.after(()=>session.destroy());session.receive(result(data));
+  await session.submit({continuations:[{draftId:'next-draft',baseRevision:3,reviewToken:TOKEN}],budgetUsd:1});
+  assert.deepEqual(backend.calls.find(([name])=>name==='confirm_generation')[1],{draftId:'draft-1',baseRevision:1,reviewToken:TOKEN,continuations:[{draftId:'next-draft',baseRevision:3,reviewToken:TOKEN}],budgetUsd:1});
+});
+
+test('confirmation stays disabled while an edited brief is being saved', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const {view,find,backend}=mountComposerView();t.after(()=>view.destroy());
+  const input=find('.review-summary-input');input.value='New direction';input.fire('input');
+  assert.equal(find('.composer-generate').disabled,true);
+  find('.composer-generate').click();assert.equal(backend.calls.length,0);
+  t.mock.timers.tick(650);await flush();
+  assert.equal(backend.data.draft.brief.summary,'New direction');
+  assert.equal(find('.composer-generate').disabled,false);
+});
+
+test('changed child plans clear batch selection and submitted batches do not report unready drafts', t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const {view,find,backend}=mountComposerView();t.after(()=>view.destroy());
+  const data=initial(),child=initial().draft;data.draft.revision=2;child.id='child';
+  data.review.continuations=[{draft:child,model,cost:{minUsd:.1,maxUsd:.1},costReason:'',reviewToken:TOKEN,validation:{errors:[]},generation:null}];
+  data.review.cost={minUsd:.1,maxUsd:.1};backend.replace(data);view.render(result(data));
+  const toggle=find('.review-auto');toggle.checked=true;toggle.fire('change');
+  let check=find('.review-choice-input');check.checked=true;check.fire('change');
+  const changed=structuredClone(data);changed.review.continuations[0].reviewToken='b'.repeat(64);changed.review.continuations[0].draft.revision=2;
+  view.render(result(changed));assert.equal(find('.review-auto').checked,false);assert.equal(find('.review-choice-input').checked,false);
+  const toggle2=find('.review-auto');toggle2.checked=true;toggle2.fire('change');
+  check=find('.review-choice-input');check.checked=true;check.fire('change');
+  const done=structuredClone(changed);done.draft.revision=3;done.draft.status='submitted';done.draft.taskRunId='task';done.review.continuations[0].draft.status='submitted';
+  view.render(result(done));assert.equal(find('.review-batch-problem').textContent,'');
+});
 
 test('catalog entries can use their model ID when an optional display title is absent', () => {
   const data = initial(); data.catalog = [{ model: model.model }];
@@ -23,7 +96,8 @@ function server() {
       if (name === 'read_generation_draft') return result(data);
       assert.equal(args.baseRevision, data.draft.revision, 'every mutation uses the latest revision');
       if (name === 'update_generation_draft') data = { ...data, draft: { ...data.draft, ...args.patch, revision: data.draft.revision + 1 } };
-      else if (name === 'submit_generation') data = { ...data, draft: { ...data.draft, status: 'submitted', taskRunId: 'task-1', revision: data.draft.revision + 1 } };
+      else if (name === 'cancel_generation') data = { ...data, draft: { ...data.draft, reviewPaused:true, revision: data.draft.revision + 1 } };
+      else if (name === 'confirm_generation') data = { ...data, draft: { ...data.draft, status: 'submitted', taskRunId: 'task-1', revision: data.draft.revision + 1 } };
       else throw new Error(`Unexpected tool ${name}`);
       return result(data);
     },
@@ -50,7 +124,7 @@ test('shared edits preserve local text and merge only explicitly retained fields
   assert.equal(session.state().local.prompt, 'My unfinished input');
   assert.equal(session.state().conflict.draft.revision, 2);
   await assert.rejects(() => session.submit(), /冲突/);
-  assert.equal(backend.calls.filter(([name]) => name === 'submit_generation').length, 0);
+  assert.equal(backend.calls.filter(([name]) => name === 'confirm_generation').length, 0);
   session.resolveConflict('local'); await session.save();
   assert.equal(backend.data.draft.prompt, 'My unfinished input');
   assert.deepEqual(backend.data.draft.parameters, { duration: 8 });
@@ -70,7 +144,7 @@ test('typing during an outstanding save is saved again before the latest copy is
   await saving; await submitting;
   assert.equal(backend.data.draft.prompt, 'Latest input');
   assert.equal(backend.calls.filter(([name]) => name === 'update_generation_draft').length, 2);
-  assert.equal(backend.calls.find(([name]) => name === 'submit_generation')[1].baseRevision, 3);
+  assert.equal(backend.calls.find(([name]) => name === 'confirm_generation')[1].baseRevision, 3);
   session.destroy();
 });
 
@@ -88,14 +162,14 @@ test('double clicks create one submit request and submitted drafts cannot submit
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const backend = server(); let release;
   const session = createDraftSession({ callTool: async (name, args) => {
-    if (name === 'submit_generation') await new Promise(resolve => { release = resolve; });
+    if (name === 'confirm_generation') await new Promise(resolve => { release = resolve; });
     return backend.callTool(name, args);
   } });
   session.receive(result(backend.data));
   const first = session.submit(), second = session.submit(); await flush(); release(); await Promise.all([first, second]);
-  assert.equal(backend.calls.filter(([name]) => name === 'submit_generation').length, 1);
+  assert.equal(backend.calls.filter(([name]) => name === 'confirm_generation').length, 1);
   await assert.rejects(() => session.submit(), /不能再次生成/);
-  assert.equal(backend.calls.filter(([name]) => name === 'submit_generation').length, 1); session.destroy();
+  assert.equal(backend.calls.filter(([name]) => name === 'confirm_generation').length, 1); session.destroy();
 });
 
 test('an unconfirmed submission blocks retries instead of risking a second charge', async t => {
@@ -137,7 +211,7 @@ test('draft context is published only when supported and never starts a chat rep
   const notes = [], session = createDraftSession({ callTool: async () => result(initial()), updateModelContext: async note => { notes.push(JSON.parse(note)); return {}; } });
   session.receive(result(initial())); await flush(); assert.deepEqual(notes, []);
   session.setCapabilities({ callTool: true, updateModelContext: true }); await flush();
-  assert.deepEqual(notes, [{ cohubDraft: 'draft-1', revision: 1, model: 'example-image', status: 'draft', prompt: 'Original' }]);
+  assert.deepEqual(notes, [{ cohubDraft: 'draft-1', revision: 1, model: 'example-image', status: 'draft', reviewPaused:false, prompt: 'Original' }]);
   session.receive(result(initial())); await flush(); assert.equal(notes.length, 1); session.destroy();
 });
 
@@ -269,7 +343,7 @@ test('expansion waits for host confirmation and returning retains unsaved text i
   t.mock.timers.tick(650); await flush();
   assert.equal(backend.data.draft.id, 'draft-1');
   assert.equal(backend.data.draft.prompt, 'Keep my unfinished description');
-  assert.equal(backend.calls.filter(([name]) => name === 'submit_generation').length, 0);
+  assert.equal(backend.calls.filter(([name]) => name === 'confirm_generation').length, 0);
 });
 
 test('unsupported expansion and return are disabled without making a host request', async t => {
@@ -346,7 +420,7 @@ test('saved state reads as plain language without internal revision numbers', t 
 test('Command or Control + Enter in the description generates once; plain Enter and IME input do not', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { view, find, backend } = mountComposerView(); t.after(() => view.destroy());
-  const submits = () => backend.calls.filter(([name]) => name === 'submit_generation').length;
+  const submits = () => backend.calls.filter(([name]) => name === 'confirm_generation').length;
   const prompt = find('.composer-prompt-input');
   prompt.fire('keydown', { key: 'Enter' }); await flush();
   prompt.fire('keydown', { key: 'Enter', metaKey: true, isComposing: true }); await flush();
@@ -364,7 +438,7 @@ test('the keyboard shortcut respects the same blocks as the Generate button', as
   const { view, find, backend } = mountComposerView(); t.after(() => view.destroy());
   const data = initial(); data.validation.errors = [{ path: 'prompt', message: '请输入生成内容', kind: 'missing' }]; view.render(result(data));
   find('.composer-prompt-input').fire('keydown', { key: 'Enter', metaKey: true }); await flush(); await flush();
-  assert.equal(backend.calls.filter(([name]) => name === 'submit_generation').length, 0);
+  assert.equal(backend.calls.filter(([name]) => name === 'confirm_generation').length, 0);
 });
 
 test('enumerated settings are direct choices that save to the shared draft', async t => {
@@ -378,7 +452,7 @@ test('enumerated settings are direct choices that save to the shared draft', asy
   assert.equal(segments[0].attributes['aria-checked'], 'true', 'the declared default is shown as the current choice');
   segments[1].click(); t.mock.timers.tick(650); await flush();
   assert.deepEqual(backend.data.draft.parameters, { ratio: '9:16' });
-  assert.equal(backend.calls.filter(([name]) => name === 'submit_generation').length, 0);
+  assert.equal(backend.calls.filter(([name]) => name === 'confirm_generation').length, 0);
 });
 
 test('dropped or pasted files map only to a media type the selected model accepts', () => {
@@ -432,6 +506,6 @@ test('a save rejected for an old revision loads the newer draft at once and asks
   assert.equal(session.state().conflict.draft.revision, 2);
   assert.equal(session.state().local.prompt, 'Mine');
   assert.doesNotMatch(session.state().error, /REVISION_CONFLICT/);
-  assert.equal(calls.filter(name => name === 'submit_generation').length, 0);
+  assert.equal(calls.filter(name => name === 'confirm_generation').length, 0);
   session.destroy();
 });
