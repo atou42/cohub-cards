@@ -37,8 +37,8 @@ cohub auth login
 下载安装：
 
 ```sh
-git clone https://github.com/atou42/cohub-cards.git
-cd cohub-cards
+git clone https://github.com/atou42/cohub-plugin.git
+cd cohub-plugin
 bash scripts/install.sh
 ```
 
