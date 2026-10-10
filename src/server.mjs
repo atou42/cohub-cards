@@ -7,7 +7,7 @@ import {createReader,querySchema} from './cards.mjs';
 import {createGenerationService,prepareSchema,readDraftSchema,updateDraftSchema,revisionSchema,addReferenceSchema} from './generation.mjs';
 export const UI_URI='ui://cohub-cards/result.html';
 export function createServer(reader=createReader(),generation=createGenerationService()) {
-  const server=new McpServer({name:'cohub-cards',version:'0.3.1'});
+  const server=new McpServer({name:'cohub-cards',version:'0.3.2'});
   const annotations={readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true};
   const ui={resourceUri:UI_URI};
   registerAppResource(server,'cohub-result',UI_URI,{},async()=>({contents:[{
@@ -24,7 +24,7 @@ export function createServer(reader=createReader(),generation=createGenerationSe
   server.registerTool('read_card',{description:'Refresh this card from the same existing Cohub object without submitting any job.',inputSchema:querySchema,annotations,_meta:{ui:{visibility:['app']}}},args=>respond(reader,args));
   const edits={readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false};
   registerAppTool(server,'prepare_generation',{
-    title:'准备 Cohub 生成',description:'Create one shared editable generation draft and its inline UI. Fill model, prompt, media, parameters and meta for the user. Empty model opens the live model picker. Does not submit or charge. For subsequent edits read and update the same draftId.',
+    title:'准备 Cohub 生成',description:'Prepare a shared draft and inline UI without generating or charging. Present a brief in chat with plan, exact prompt, all references and their roles, output scope, and grounded cost estimate (or unknown). Wait for approval before submission unless the user explicitly delegated approval within a stated scope. An initial creative request is not approval of an unseen brief. For edits read and update the same draftId.',
     inputSchema:prepareSchema,annotations:edits,_meta:{ui},
   },args=>respond(generation.prepare,args));
   server.registerTool('read_generation_draft',{
@@ -36,7 +36,7 @@ export function createServer(reader=createReader(),generation=createGenerationSe
     inputSchema:updateDraftSchema,annotations:edits,_meta:{ui:{visibility:['model','app']}},
   },args=>respond(generation.update,args));
   server.registerTool('submit_generation',{
-    title:'开始 Cohub 生成',description:'Submit the saved shared draft to Cohub, possibly incurring model charges. Use only when the user requests generation or presses Generate. Requires the current revision. A draft submits at most once; an unknown attempt must be investigated, never silently retried. Local references become accessible URLs in the selected Cohub Space for the model to read.',
+    title:'开始 Cohub 生成',description:'Submit a saved draft and incur model charges only AFTER the user approves its displayed brief (plan, exact prompt, references, scope and costs), or under explicit user-delegated approval within its limits. A generic creation request, silence or approval of a previous stage is insufficient. Re-read and match the current draft to the approved brief; material changes require renewed approval. A user click on Generate confirms the current draft. Requires current revision. Never retry an unknown attempt. Local references are uploaded to accessible URLs in the selected Cohub Space.',
     inputSchema:revisionSchema,annotations:{...edits,idempotentHint:true,openWorldHint:true},_meta:{ui:{visibility:['model','app']}},
   },args=>respond(generation.submit,args));
   server.registerTool('add_generation_reference',{
