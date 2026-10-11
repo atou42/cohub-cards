@@ -5,3 +5,4 @@ release/
 .DS_Store
 VERIFICATION.md
 scripts/preview.mjs
+.cohub-source/
